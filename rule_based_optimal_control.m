@@ -9,16 +9,18 @@ L = 2; % total length of vehicle
 tf = 2; % simulation end time, simulation begins at t=0
 T = 0.05; % time step
 N = tf/T; % no. of time steps
-x_e = 1;
-y_e = 2.2;
-theta_e = 0;
-% init_pose_e = [1,2.2,0]; % ego vehicle initial pose (pose = [x; y; theta]) 
-% ref_traj = [linspace(1,20,N)', 1.75*ones(N,1), zeros(N,1)];
-x_r = linspace(1,20,N)';
-y_r = 1.75*ones(N,1);
-theta_r = zeros(N,1);
-Xr = [x_r; y_r; theta_r];
-Xp = [1.5,2.75];
+init_pose_e = [1,2.2,0]; % ego vehicle initial pose (pose = [x; y; theta]) 
+% reference trajectory also follows [x,y,theta]
+ref_traj = [linspace(1,20,N)', 1.75*ones(N,1), zeros(N,1)]; 
+pedestrian_position = [1.5,2.75];
+dist_from_ped = 1;  
+
+% Priority structure for iterative rule-relaxation algorithm
+% Order of rules is: 
+%   1. Maintain safe distance from pedestrian
+%   2. Lane-keeping
+%   3. Min. speed limit
+% 1 means the rule is enforced, 0 means the rule is relaxed
 priority_structure = [1,1,1;
                       1,1,0;
                       1,0,1;
@@ -26,270 +28,198 @@ priority_structure = [1,1,1;
                       0,1,1;
                       0,1,0;
                       0,0,1;
-                      0,0,0;];
+                      0,0,0];
 
-for i = 1:8
+%% Rule Relaxation Algorithm
+
+% Iterative rule-relaxation algorithm, relaxes rules according to priority
+% structure and checks for feasible solution. If found, exits the loop. If
+% not, continues to next scenario and checks for feasible solution.
+for i = 1:length(priority_structure)
     i
-    rules = priority_structure(i,:);
+    % information about which rules are enforced/relaxed
+    enforced_rules = priority_structure(i,:); 
+    % initial guess for fmincon
     u0 = [10*ones(N,1) ones(N,1)*0.3 ones(N,1)*10 ones(N,1)*0 ones(N,1)*1 ones(N,1)*0];
-    options = optimoptions('fmincon', 'Display', 'iter', 'Algorithm', 'sqp','StepTolerance',1e-6, 'MaxFunctionEvaluations',1e6, 'MaxIterations',1e3);
-    [u_opt, fval, exit_flag] = fmincon(@(u) objective_fun(u, [x_e,y_e,theta_e], Xr,N,T), u0, [], [], [], [], [], [], @(u) nl_constraints(u, [x_e,y_e,theta_e], [x_r,y_r,theta_r], Xp,N,T,rules), options);
+    % using SQP algorithm with fmincon since we have non-linear dynamics
+    options = optimoptions('fmincon', 'Display', 'iter', 'Algorithm', ...
+        'sqp','StepTolerance',1e-6, 'MaxFunctionEvaluations',1e6, ...
+        'MaxIterations',1e3);
+    [u_opt, fval, exit_flag] = fmincon( ...
+                               @(u) objective_fun(u), u0, [], [], [], ...
+                               [], [], [],@(u) nl_constraints(u, ...
+                               init_pose_e,ref_traj, pedestrian_position, ...
+                               N,T,enforced_rules, dist_from_ped), options);
+    % if optimization is successful and feasible solution is found, exit
+    % the for loop and return that solution. Else continue on to next
+    % scenario.
     if exit_flag == 1 || exit_flag == 2
         break;
     end
 end
 
-%%
-x(1,:) = x_e;
-y(1,:) = y_e;
-theta(1,:) = theta_e;
+% Construct state trajectory based on optimal control trajectory
+traj_opt = zeros(N,3);
+traj_opt(1,1) = init_pose_e(1);
+traj_opt(1,2) = init_pose_e(2);
+traj_opt(1,3) = init_pose_e(3);
 
 for i =1:N
-    x(i+1) = x(i) + u_opt(i,1)*cos(theta(i))*T;
-    y(i+1) = y(i) + u_opt(i,1)*sin(theta(i))*T;
-    theta(i+1) = theta(i) + u_opt(i,2)*T;
+    traj_opt(i+1,1) = traj_opt(i,1) + u_opt(i,1)*cos(traj_opt(i,3))*T;
+    traj_opt(i+1,2) = traj_opt(i,2) + u_opt(i,1)*sin(traj_opt(i,3))*T;
+    traj_opt(i+1,3) = traj_opt(i,3) + u_opt(i,2)*T;
 end
+
+%% Plotting
 
 t = linspace(0,tf,N+1);
 
-figure()
-plot(x,y)
+% Plotting optimal trajectory
+figure(1)
+plot(traj_opt(:,1),traj_opt(:,2))
 hold on
-scatter(x,y)
+scatter(traj_opt(:,1),traj_opt(:,2))
 axis square
 axis equal
 xlim([0, 20]); % Set x-axis limits
 ylim([0, 6]); % Set y-axis limits
 plot([0,20],[2,2],'Linewidth',2)
-viscircles([1.5,2.75],[1])
-
+plot([0,20],[0.75,0.75],'Linewidth',2)
+% draw the safe circle around the pedestrian
+th = 0:pi/50:2*pi;
+xunit = dist_from_ped*cos(th) + pedestrian_position(1);
+yunit = dist_from_ped*sin(th) + pedestrian_position(2);
+plot(xunit, yunit);
+xlabel("X")
+ylabel("Y")
+legend("Trajectory","","Relaxable Lane Limit", "Unrelaxable Lane Limit", "Safe Circle Around Pedestrian")
 title('Trajectory Generated')
 
-figure
-plot(t,x)
+% Plotting states v/s time
+figure(2)
+plot(t,traj_opt(:,1))
 hold on
-plot(t,y)
+plot(t,traj_opt(:,2))
+plot(t,traj_opt(:,3))
+xlabel("Time")
+legend("X", "Y", "\theta")
+title("Ego Vehicle Pose v/s Time")
 
-figure
-% plot(t(1:N), u_opt(:,1))
-% hold on
-% plot(t(1:N), u_opt(:,2))
-% plot(t(1:N), u_opt(:,3))
-plot(t(1:N), u_opt(:,5),'Linewidth',2)
-title('Lane Keeping Slack Variable')
+% Plotting slack variables
+figure(3)
 
-figure
-plot(t(1:N), u_opt(:,4),'Linewidth',2)
-title('Pedestrian Slack Variable')
+subplot(4,1,1)
+plot(t(1:N), u_opt(:,3))
+title('CLF Slack Variable v/s Time')
 
-figure
-plot(t(1:N), u_opt(:,6),'Linewidth',2)
-title('Min Velocity Slack Variable')
+subplot(4,1,2)
+plot(t(1:N), u_opt(:,4))
+title('Pedestrian Slack Variable v/s Time')
 
-figure
-plot(t(1:N), u_opt(:,3),'Linewidth',2)
-title('CLF Slack Variable')
+subplot(4,1,3)
+plot(t(1:N), u_opt(:,5))
+title('Lane Keeping Slack Variable v/s Time')
 
-% figure
-% plot(x,y)
-% hold on
-% scatter(x,y)
-% plot([1,20],[2,2])
-% viscircles([1.75,2],[1])
-% 
-% figure
-% plot(t,x)
-% hold on
-% plot(t,y)
-% 
-% figure
-% plot(t(1:N), u_opt(:,1))
-% hold on
-% plot(t(1:N), u_opt(:,2))
-% plot(t(1:N), u_opt(:,3))
-% legend("v","w","\delta_e")
-
-% u0 = u_opt;
+subplot(4,1,4)
+plot(t(1:N), u_opt(:,6))
+title('Min Velocity Slack Variable v/s Time')
 
 %% Functions
 
-function cost = objective_fun(u,X0, Xr,N,T)
-    coeffV = 0.1;
-    coeffO = 0.1;
-    coeffD = 0.01;
-    coeffD1 = 100;
-    coeffD2 = 1.5;
-    coeffD3 = 0.1;
-%     coeffError = 1;
-%     x(1,:) = X0(1);
-%     y(1,:) = X0(2);
-%     theta(1,:) = X0(3);
-%     v_store = u(:,1);
-% %     size(v_store)
-%     omega_store = u(:,2);
-% 
-%     for i =1:N
-%         x(i+1) = x(i) + v_store(i)*cos(omega_store(i))*T;
-%         y(i+1) = y(i) + v_store(i)*sin(omega_store(i))*T;
-%         theta(i+1) = theta(i) + omega_store(i)*T;
-%     end
-% 
-%     error = sqrt((x - Xr(1)).^2 + (y - Xr(2)).^2 + (theta - Xr(3)).^2);
-    cost = coeffV*sum(u(:,1).^2) + coeffO*sum(u(:,2).^2) + coeffD*sum(u(:,3).^2) + coeffD1*sum(u(:,4).^2) + coeffD2*sum(u(:,5).^2) + coeffD3*sum(u(:,6).^2);
+function cost = objective_fun(u)
+    % Objective function for minimization
+    cost_coeff_v = 0.1;
+    cost_coeff_omega = 0.1;
+    cost_coeff_clf_slack = 0.01;
+    cost_coeff_cbf_slack_1 = 100;
+    cost_coeff_cbf_slack_2 = 1.5;
+    cost_coeff_cbf_slack_3 = 0.1;
 
+    cost = cost_coeff_v*sum(u(:,1).^2) + cost_coeff_omega*sum(u(:,2).^2) + ...
+           cost_coeff_clf_slack*sum(u(:,3).^2) + ...
+           cost_coeff_cbf_slack_1*sum(u(:,4).^2) + ...
+           cost_coeff_cbf_slack_2*sum(u(:,5).^2) + ...
+           cost_coeff_cbf_slack_3*sum(u(:,6).^2);
 end
 
-function [ineq, eq] = nl_constraints(u, X0, Xr, Xp,N,T, rules)
-    
+function [ineq, eq] = nl_constraints(u, init_pose_e, ref_traj, ...
+                        pedestrian_position,N,T,enforced_rules, dist_from_ped)
+    % Non-linear constraints for optimization. Includes system dynamics,
+    % CLF trajectory tracking constraints and CBF rule constraints.
     v_store = u(:,1);
-%     size(v_store)
     omega_store = u(:,2);
     delta_e_store = u(:,3);
-    esp = 1.5;
-
-    gamma1 = 0.1;
-    gamma2 = 100;
-    gamma3 = 1;
-    x = zeros(N+1,1);
-    y = zeros(N+1,1);
-    theta = zeros(N+1,1);
-    r = 1;
-
-    x(1,:) = X0(1);
-    y(1,:) = X0(2);
-    theta(1,:) = X0(3);
-
-    for i =1:N
+    r = dist_from_ped; % radius of safe circle around pedestrian
+    % Tuning parameters
+    eps = 1.5; % tuning constant for CLF
+    gamma1 = 0.1; % tuning constant for CBF 1
+    gamma2 = 100; % tuning constant for CBF 2
+    gamma3 = 1; % tuning constant for CBF 3
+    
+    x = zeros(N,1);
+    y = zeros(N,1);
+    theta = zeros(N,1);
+    x(1,:) = init_pose_e(1);
+    y(1,:) = init_pose_e(2);
+    theta(1,:) = init_pose_e(3);
+    % System dynamics using forward Euler
+    for i =1:N-1
         x(i+1) = x(i) + v_store(i)*cos(theta(i))*T;
         y(i+1) = y(i) + v_store(i)*sin(theta(i))*T;
         theta(i+1) = theta(i) + omega_store(i)*T;
     end
     
-    x = x(1:N);
-    y = y(1:N);
-    theta = theta(1:N);
-    error = (x - Xr(:,1)).^2 + (y - Xr(:,2)).^2 + (theta - Xr(:,3)).^2;
-
-    ineq = [v_store.*(2*(x - Xr(:,1)).*cos(theta) + 2*(y - Xr(:,2)).*sin(theta) + 2*(theta - Xr(:,3)).*omega_store) + esp*(error) - delta_e_store ; 
-        -delta_e_store;
-        -v_store;
-        v_store-20;
-        -omega_store-deg2rad(50);
-        omega_store-deg2rad(50);
-        -(x-Xp(1)).^2 - (y-Xp(2)).^2 + r^2 - gamma1*(2*(x - Xp(1)).*v_store.*cos(theta) + 2*(y - Xp(2)).*v_store.*sin(theta)) + u(:,4);
-        -(-v_store.*cos(theta) + gamma2*(-y + 2) - u(:,5));
-        -(gamma3*(v_store - 5) - u(:,6));
-        0.75-y;
-        ];
-
-    eq = [x(N) - Xr(N,1);
-        y(N) - Xr(N,2);
-        theta(N) - Xr(N,3);
-%         v_store(N);
-        omega_store(N);
-        ];
-
-    if (rules(1) == 1)
+    % Calculate 2-norm of error between current state trajectory and 
+    % reference trajectory, which is chosen as the Lyapunov function for
+    % CLF. This will be used for the CLF inequality constraint.
+    error = (x - ref_traj(:,1)).^2 + (y - ref_traj(:,2)).^2 + ...
+            (theta - ref_traj(:,3)).^2;
+    
+    % Inequality constraints for fmincon. Here are the constraints in
+    % order:
+    %   1. CLF constraint for trajectory tracking
+    %   2. CLF slack variable > 0 for all t
+    %   3. and 4. 0 m/s <= ego velocity <= 20 m/s
+    %   5. and 6. -50 rad/s <= ego angular velocity <= 50 rad/s
+    %   7. CBF constraint 1 - Safe distance from pedestrian
+    %   8. CBF constraint 2 - Lane-keeping
+    %   9. CBF constraint 3 - Min. speed limit
+    %   10. Non-relaxable lane constraint
+    ineq = [v_store.*(2*(x - ref_traj(:,1)).*cos(theta) + ...
+            2*(y - ref_traj(:,2)).*sin(theta) + ...
+            2*(theta - ref_traj(:,3)).*omega_store) + eps*(error) ...
+            - delta_e_store; 
+            -delta_e_store;
+            -v_store;
+            v_store-20;
+            -omega_store-deg2rad(50);
+            omega_store-deg2rad(50);
+            -(x-pedestrian_position(1)).^2 - (y-pedestrian_position(2)).^2 ...
+            + r^2 - ...
+            gamma1*(2*(x - pedestrian_position(1)).*v_store.*cos(theta) + ...
+            2*(y - pedestrian_position(2)).*v_store.*sin(theta)) + u(:,4);
+            -(-v_store.*cos(theta) + gamma2*(-y + 2) - u(:,5));
+            -(gamma3*(v_store - 5) - u(:,6));
+            0.75-y];
+    
+    % Equality constraints for fmincon. Includes terminal constraint for
+    % final pose of eg vehicle and enforces the condition that ego must
+    % come to a stop at the end of the trajectory.
+    eq = [x(N) - ref_traj(N,1);
+          y(N) - ref_traj(N,2);
+          theta(N) - ref_traj(N,3);
+          v_store(N);
+          omega_store(N)];
+    
+    % If rule no. 1 is enforced, enforce CBF slack variable 1 to be zero,
+    % and so on for the other rules.
+    if (enforced_rules(1) == 1)
         eq(end+1:end+N,1) = u(:,4);
     end
-    if (rules(2) == 1)
+    if (enforced_rules(2) == 1)
         eq(end+1:end+N,1) = u(:,5);
     end
-    if (rules(3) == 1)
+    if (enforced_rules(3) == 1)
         eq(end+1:end+N,1) = u(:,6);
     end
-
-%     eq = [x(N) - Xr(1);
-%         y(N) - Xr(2);
-%         theta(N) - Xr(3);
-% %         v_store(N);
-%         omega_store(N);
-% %         u(:,3);
-% %         u(:,4);
-% %         u(:,5);
-% %         u(:,6)
-%         ];
-%     if(idx == 1) % No relaxation
-%         eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-%         v_store(N);
-%         omega_store(N);
-%         u(:,4);
-%         u(:,5);
-%         u(:,6)
-%         ];
-%     end
-%     
-%     if(idx == 2) % Relaxing 3
-%         eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-%         v_store(N);
-%         omega_store(N);
-%         u(:,4);
-%         u(:,5)
-%         ];
-%     end
-%     
-%     if(idx == 3) % Relaxing 2
-%         eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-%         v_store(N);
-%         omega_store(N);
-%         u(:,4);
-%         u(:,6)
-%         ];
-%     end
-%     
-%     if(idx == 4) % Relaxing 2 and 3
-%         eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-%         v_store(N);
-%         omega_store(N);
-%         u(:,4)
-%         ];
-%     end
-%     
-%     if(idx == 5) % Relaxing 1
-%         eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-% %         v_store(N);
-%         omega_store(N);
-%         u(:,5)
-%         u(:,6)
-%         ];
-%     end
-%     
-%     if(idx == 6) % Relaxing 1 and 3
-%         eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-% %         v_store(N);
-%         omega_store(N);
-%         u(:,5);
-%         ];
-%     end
-%     
-%     if(idx == 7) % Relaxing 2 and 1
-%          eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-% %         v_store(N);
-%         omega_store(N);
-%         u(:,6);
-%         ];
-%     end
-%     
-%     if(idx == 8) % All relaxed
-%         eq = [x(N) - Xr(N,1);
-%         y(N) - Xr(N,2);
-%         theta(N) - Xr(N,3);
-% %         v_store(N);
-%         omega_store(N);
-%         ];
-%     end
 end

@@ -230,5 +230,6 @@ void EgoVehicle::finalize_solution(Ipopt::SolverReturn status,
 }
 
 int main() {
+    std::cout << "nothing here yet" << std::endl;
     return 0;
 }
